@@ -13,12 +13,7 @@ List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Lock to portrait — this is an exercise-tracking app, landscape isn't a
-  // realistic use case, and supporting it reliably needs more device-specific
-  // tuning than is worth the complexity here.
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   cameras = await availableCameras();
   runApp(const MyApp());
 }
@@ -36,6 +31,26 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// Per-exercise configuration: thresholds, goal, and ideal target angles.
+class ExerciseConfig {
+  final String label;
+  final int goal;
+  final double downThreshold;
+  final double upThreshold;
+
+  const ExerciseConfig({
+    required this.label,
+    required this.goal,
+    required this.downThreshold,
+    required this.upThreshold,
+  });
+}
+
+const Map<ExerciseType, ExerciseConfig> exerciseConfigs = {
+  ExerciseType.squat: ExerciseConfig(label: "Squats", goal: 10, downThreshold: 110, upThreshold: 160),
+  ExerciseType.pushup: ExerciseConfig(label: "Push-ups", goal: 5, downThreshold: 95, upThreshold: 155),
+};
+
 class PoseTrackingScreen extends StatefulWidget {
   const PoseTrackingScreen({super.key});
 
@@ -50,29 +65,65 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   List<Pose> _poses = [];
   bool _isDetecting = false;
   CameraDescription? _selectedCamera;
-  final List<double> _kneeAngleBuffer = [];
-  double _currentKneeAngle = 0;
+
+  ExerciseType _selectedExercise = ExerciseType.squat;
+
+  final List<double> _angleBuffer = [];
+  double _currentAngle = 0;
   int _repCount = 0;
-  final RepDetector _squatDetector = RepDetector(
-    downThreshold: 110, // knee angle below this = "down" (squatting)
-    upThreshold: 160,   // knee angle above this = "up" (standing)
-    framesToConfirm: 5,
-  );
+  late RepDetector _repDetector;
   final CalibrationManager _calibration = CalibrationManager(framesToConfirm: 20);
   final VoiceFeedbackService _voice = VoiceFeedbackService();
-  bool _backWarnedThisRep = false;
-  bool _hasAnnouncedStart = false;
+
+  bool _formWarnedThisRep = false;
+  double _minSecondaryAngleThisRep = 200;
   final List<double> _scores = [];
-  double _minBackAngleThisRep = 200;
-  static const int _sessionGoal = 10;
   bool _sessionComplete = false;
+  String? _statusBanner;
+  Timer? _bannerTimer;
 
   @override
   void initState() {
     super.initState();
     _poseDetector = PoseDetector(options: PoseDetectorOptions());
+    _repDetector = _buildRepDetector(_selectedExercise);
     _voice.init();
     _initCamera();
+  }
+
+  void _showBanner(String message) {
+    _bannerTimer?.cancel();
+    setState(() {
+      _statusBanner = message;
+    });
+    _bannerTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _statusBanner = null);
+    });
+  }
+
+  RepDetector _buildRepDetector(ExerciseType exercise) {
+    final cfg = exerciseConfigs[exercise]!;
+    return RepDetector(downThreshold: cfg.downThreshold, upThreshold: cfg.upThreshold, framesToConfirm: 5);
+  }
+
+  void _resetSession() {
+    setState(() {
+      _repCount = 0;
+      _repDetector = _buildRepDetector(_selectedExercise);
+      _calibration.reset();
+      _formWarnedThisRep = false;
+      _minSecondaryAngleThisRep = 200;
+      _scores.clear();
+      _sessionComplete = false;
+    });
+  }
+
+  void _onExerciseChanged(ExerciseType? newExercise) {
+    if (newExercise == null) return;
+    setState(() {
+      _selectedExercise = newExercise;
+    });
+    _resetSession();
   }
 
   Future<void> _initCamera() async {
@@ -114,74 +165,24 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
       if (inputImage != null) {
         final poses = await _poseDetector.processImage(inputImage);
 
-        double kneeAngle = _currentKneeAngle;
+        double currentAngle = _currentAngle;
         if (poses.isNotEmpty) {
           final landmarks = poses.first.landmarks;
-          final hip = landmarks[PoseLandmarkType.leftHip];
-          final knee = landmarks[PoseLandmarkType.leftKnee];
-          final ankle = landmarks[PoseLandmarkType.leftAnkle];
 
-          final shoulder = landmarks[PoseLandmarkType.leftShoulder];
-
-          if (hip != null && knee != null && ankle != null) {
-            final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
-            kneeAngle = AngleCalculator.smooth(_kneeAngleBuffer, rawAngle);
-
-            if (!_calibration.isCalibrated) {
-              final justCalibrated = _calibration.checkSquatStart(landmarks);
-              if (justCalibrated) {
-                _voice.speak("Position matched. Start!", force: true, minGapMs: 0);
-              }
-            } else {
-              if (!_hasAnnouncedStart) {
-                _hasAnnouncedStart = true;
-              }
-
-              // Mid-rep back-straightness check, only meaningful during the "down" phase
-              if (shoulder != null && _squatDetector.state == "down") {
-                final backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
-                _minBackAngleThisRep = backAngle < _minBackAngleThisRep ? backAngle : _minBackAngleThisRep;
-                if (backAngle < 145 && !_backWarnedThisRep) {
-                  _voice.speak("Stop. Straighten your back.", force: true, minGapMs: 1200);
-                  _backWarnedThisRep = true;
-                }
-              }
-
-              final wasDown = _squatDetector.state == "down";
-              final depthAtRepEnd = _squatDetector.extremeAngle;
-              final repCompleted = _squatDetector.update(kneeAngle);
-              if (wasDown == false && _squatDetector.state == "down") {
-                _backWarnedThisRep = false; // reset warning flag on entering a new "down" phase
-                _minBackAngleThisRep = 200; // reset for the new rep
-              }
-              if (repCompleted) {
-                _repCount++;
-                final score = FormScorer.scoreSquat(
-                  depthAngle: depthAtRepEnd ?? 90,
-                  backAngle: _minBackAngleThisRep == 200 ? 150 : _minBackAngleThisRep,
-                );
-                _scores.add(score);
-                _voice.speak("$_repCount", force: true, minGapMs: 0);
-
-                if (_repCount >= _sessionGoal) {
-                  _sessionComplete = true;
-                  Future.delayed(const Duration(milliseconds: 900), () {
-                    _voice.speak(
-                      "Session complete! You finished all $_sessionGoal reps. Excellent work!",
-                      force: true,
-                      minGapMs: 0,
-                    );
-                  });
-                }
-              }
+          if (!_calibration.isCalibrated) {
+            final justCalibrated = _calibration.checkStart(_selectedExercise, landmarks);
+            if (justCalibrated) {
+              _voice.speak("Position matched. Start!", force: true, minGapMs: 0);
             }
+          } else {
+            currentAngle = _handleActiveTracking(landmarks) ?? currentAngle;
           }
         }
 
         if (mounted) {
           setState(() {
             _poses = poses;
-            _currentKneeAngle = kneeAngle;
+            _currentAngle = currentAngle;
           });
         }
       }
@@ -192,12 +193,98 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     _isDetecting = false;
   }
 
+  /// Runs the primary-angle calculation, rep-state update, form checking,
+  /// and scoring for whichever exercise is currently selected. Returns the
+  /// primary angle for display, or null if required landmarks aren't visible.
+  double? _handleActiveTracking(Map<PoseLandmarkType, PoseLandmark?> landmarks) {
+    final cfg = exerciseConfigs[_selectedExercise]!;
+
+    PoseLandmark? p1, p2, p3; // primary angle: p1-p2-p3, angle at p2
+    PoseLandmark? s1, s2, s3; // secondary (form) angle: s1-s2-s3, angle at s2
+    String formWarningMessage;
+
+    if (_selectedExercise == ExerciseType.squat) {
+      p1 = landmarks[PoseLandmarkType.leftHip];
+      p2 = landmarks[PoseLandmarkType.leftKnee];
+      p3 = landmarks[PoseLandmarkType.leftAnkle];
+      s1 = landmarks[PoseLandmarkType.leftShoulder];
+      s2 = landmarks[PoseLandmarkType.leftHip];
+      s3 = landmarks[PoseLandmarkType.leftKnee];
+      formWarningMessage = "Stop. Straighten your back.";
+    } else {
+      p1 = landmarks[PoseLandmarkType.leftShoulder];
+      p2 = landmarks[PoseLandmarkType.leftElbow];
+      p3 = landmarks[PoseLandmarkType.leftWrist];
+      s1 = landmarks[PoseLandmarkType.leftShoulder];
+      s2 = landmarks[PoseLandmarkType.leftHip];
+      s3 = landmarks[PoseLandmarkType.leftAnkle];
+      formWarningMessage = "Stop. Keep your body straight.";
+    }
+
+    if (p1 == null || p2 == null || p3 == null) return null;
+
+    final rawAngle = AngleCalculator.calculateAngle(p1, p2, p3);
+    final angle = AngleCalculator.smooth(_angleBuffer, rawAngle);
+
+    // Mid-rep form check, only meaningful during the "down" phase
+    if (s1 != null && s2 != null && s3 != null && _repDetector.state == "down") {
+      final secondaryAngle = AngleCalculator.calculateAngle(s1, s2, s3);
+      _minSecondaryAngleThisRep =
+          secondaryAngle < _minSecondaryAngleThisRep ? secondaryAngle : _minSecondaryAngleThisRep;
+
+      final formBreakThreshold = _selectedExercise == ExerciseType.squat ? 145.0 : 150.0;
+      if (secondaryAngle < formBreakThreshold && !_formWarnedThisRep) {
+        _voice.speak(formWarningMessage, force: true, minGapMs: 1200);
+        _formWarnedThisRep = true;
+      }
+    }
+
+    final wasDown = _repDetector.state == "down";
+    final depthAtRepEnd = _repDetector.extremeAngle;
+    final wasWarnedThisRep = _formWarnedThisRep;
+    final repCompleted = _repDetector.update(angle);
+
+    if (wasDown == false && _repDetector.state == "down") {
+      _formWarnedThisRep = false;
+      _minSecondaryAngleThisRep = 200;
+    }
+
+    if (repCompleted) {
+      if (wasWarnedThisRep) {
+        // Form broke at some point during this rep — don't count it, don't
+        // score it, and don't speak a number. The "Stop" correction already
+        // covered it; speaking anything more here is what caused the
+        // confusing overlapping audio before. Show a brief visual banner
+        // instead, since text can't collide with speech.
+        _showBanner("Rep not counted — fix your form and try again");
+      } else {
+        _repCount++;
+        final secondaryForScore = _minSecondaryAngleThisRep == 200 ? 150.0 : _minSecondaryAngleThisRep;
+        final score = _selectedExercise == ExerciseType.squat
+            ? FormScorer.scoreSquat(depthAngle: depthAtRepEnd ?? 90, backAngle: secondaryForScore)
+            : FormScorer.scorePushup(depthAngle: depthAtRepEnd ?? 75, bodyLineAngle: secondaryForScore);
+        _scores.add(score);
+        _voice.speak("$_repCount", force: true, minGapMs: 0);
+
+        if (_repCount >= cfg.goal) {
+          _sessionComplete = true;
+          Future.delayed(const Duration(milliseconds: 900), () {
+            _voice.speak(
+              "Session complete! You finished all ${cfg.goal} reps. Excellent work!",
+              force: true,
+              minGapMs: 0,
+            );
+          });
+        }
+      }
+    }
+
+    return angle;
+  }
+
   InputImage? _convertCameraImage(CameraImage image) {
     final camera = _selectedCamera!;
     final sensorOrientation = camera.sensorOrientation;
-
-    // Fixed rotation based on the camera sensor only — correct and reliable
-    // for portrait use, which is this app's only supported orientation.
     final rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ??
         InputImageRotation.rotation0deg;
 
@@ -223,26 +310,42 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     _controller?.dispose();
     _poseDetector.close();
     _voice.dispose();
+    _bannerTimer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final isFrontCamera = _selectedCamera?.lensDirection == CameraLensDirection.front;
+    final cfg = exerciseConfigs[_selectedExercise]!;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("AI Posture Coach — Pose Test"),
+        title: const Text("AI Posture Coach"),
         backgroundColor: Colors.teal[800],
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(
+              child: DropdownButton<ExerciseType>(
+                value: _selectedExercise,
+                dropdownColor: Colors.teal[800],
+                style: const TextStyle(color: Colors.white),
+                underline: const SizedBox(),
+                items: exerciseConfigs.entries
+                    .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value.label)))
+                    .toList(),
+                onChanged: _onExerciseChanged,
+              ),
+            ),
+          ),
+        ],
       ),
       body: _isCameraReady && _controller != null
           ? Stack(
               fit: StackFit.expand,
               children: [
-                // Android's front camera preview is already mirrored natively —
-                // we do NOT flip this widget. Only the skeleton overlay below is
-                // flipped (in SkeletonPainter) to match what's already on screen.
                 CameraPreview(_controller!),
                 CustomPaint(
                   painter: SkeletonPainter(
@@ -253,8 +356,29 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                 ),
                 if (!_calibration.isCalibrated)
                   CustomPaint(
-                    painter: ShadowGuidePainter(),
+                    painter: ShadowGuidePainter(
+                      exercise: _selectedExercise,
+                      deviceOrientation: _controller?.value.deviceOrientation ?? DeviceOrientation.portraitUp,
+                    ),
                     size: Size.infinite,
+                  ),
+                if (_statusBanner != null)
+                  Positioned(
+                    top: 130,
+                    left: 12,
+                    right: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade900.withOpacity(0.85),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        _statusBanner!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+                      ),
+                    ),
                   ),
                 Positioned(
                   top: 12,
@@ -263,19 +387,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     color: Colors.black54,
                     child: Text(
-                      "Landmarks detected: ${_poses.isNotEmpty ? _poses.first.landmarks.length : 0}",
-                      style: const TextStyle(color: Colors.white, fontSize: 13),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 50,
-                  left: 12,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    color: Colors.black54,
-                    child: Text(
-                      "Left Knee Angle: ${_currentKneeAngle.toStringAsFixed(1)}°",
+                      "Angle: ${_currentAngle.toStringAsFixed(1)}°",
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                     ),
                   ),
@@ -295,10 +407,12 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text(
-                            "Match the outline: stand straight, full body visible",
+                          Text(
+                            _selectedExercise == ExerciseType.squat
+                                ? "Match the outline: stand straight, full body visible"
+                                : "Match the outline: top push-up position, side-on view",
                             textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white, fontSize: 14),
+                            style: const TextStyle(color: Colors.white, fontSize: 14),
                           ),
                           const SizedBox(height: 8),
                           LinearProgressIndicator(
@@ -312,20 +426,20 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                   ),
                 if (_calibration.isCalibrated) ...[
                   Positioned(
-                    top: 88,
+                    top: 50,
                     left: 12,
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       color: Colors.black54,
                       child: Text(
-                        "Squat Reps: $_repCount / $_sessionGoal   (state: ${_squatDetector.state})",
+                        "${cfg.label} Reps: $_repCount / ${cfg.goal}   (state: ${_repDetector.state})",
                         style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ),
                   if (_scores.isNotEmpty)
                     Positioned(
-                      top: 126,
+                      top: 88,
                       left: 12,
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -341,18 +455,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                     right: 20,
                     child: FloatingActionButton(
                       backgroundColor: Colors.teal[700],
-                      onPressed: () {
-                        setState(() {
-                          _repCount = 0;
-                          _squatDetector.reset();
-                          _calibration.reset();
-                          _backWarnedThisRep = false;
-                          _hasAnnouncedStart = false;
-                          _scores.clear();
-                          _minBackAngleThisRep = 200;
-                          _sessionComplete = false;
-                        });
-                      },
+                      onPressed: _resetSession,
                       child: const Icon(Icons.refresh),
                     ),
                   ),
@@ -373,9 +476,14 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              "You finished all $_sessionGoal reps.\nAvg Score: ${_scores.isEmpty ? '-' : (_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}",
+                              "You finished all ${cfg.goal} ${cfg.label}.\nAvg Score: ${_scores.isEmpty ? '-' : (_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}",
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.white, fontSize: 16),
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton(
+                              onPressed: _resetSession,
+                              child: const Text("Try Again"),
                             ),
                           ],
                         ),
@@ -390,19 +498,42 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     );
   }
 
-  // The raw camera preview size is fixed to the sensor's natural landscape
-  // orientation, so width/height are swapped to match portrait display.
   Size _getImageSize() {
     final previewSize = _controller!.value.previewSize!;
     return Size(previewSize.height, previewSize.width);
   }
 }
 
-// Draws a translucent dashed outline of the target standing pose, shown
-// during calibration so the user knows exactly how to position themselves.
+// Draws a translucent outline of the target starting pose for calibration.
+// Rotated to match the phone's PHYSICAL orientation (even though the app's
+// software UI stays locked in portrait) so the guide visually lines up with
+// how the camera content actually appears when the phone is turned sideways
+// — e.g. for push-ups, which need a landscape-style framing of the body.
 class ShadowGuidePainter extends CustomPainter {
+  final ExerciseType exercise;
+  final DeviceOrientation deviceOrientation;
+  ShadowGuidePainter({required this.exercise, required this.deviceOrientation});
+
+  double get _rotationRadians {
+    switch (deviceOrientation) {
+      case DeviceOrientation.landscapeLeft:
+        return -1.5707963; // -90°
+      case DeviceOrientation.landscapeRight:
+        return 1.5707963; // 90°
+      case DeviceOrientation.portraitDown:
+        return 3.14159265; // 180°
+      case DeviceOrientation.portraitUp:
+        return 0;
+    }
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.translate(size.width / 2, size.height / 2);
+    canvas.rotate(_rotationRadians);
+    canvas.translate(-size.width / 2, -size.height / 2);
+
     final paint = Paint()
       ..color = Colors.tealAccent.withOpacity(0.5)
       ..strokeWidth = 6
@@ -411,27 +542,39 @@ class ShadowGuidePainter extends CustomPainter {
 
     final w = size.width;
     final h = size.height;
-    final cx = w * 0.5;
 
-    final headY = h * 0.18;
-    final shoulderY = h * 0.26;
-    final hipY = h * 0.52;
-    final ankleY = h * 0.88;
+    if (exercise == ExerciseType.squat) {
+      final cx = w * 0.5;
+      final headY = h * 0.18;
+      final shoulderY = h * 0.26;
+      final hipY = h * 0.52;
+      final ankleY = h * 0.88;
 
-    // Head
-    canvas.drawCircle(Offset(cx, headY), h * 0.045, paint);
-    // Torso
-    canvas.drawLine(Offset(cx, shoulderY), Offset(cx, hipY), paint);
-    // Arms (relaxed at sides)
-    canvas.drawLine(Offset(cx, shoulderY), Offset(cx - w * 0.12, hipY * 0.95), paint);
-    canvas.drawLine(Offset(cx, shoulderY), Offset(cx + w * 0.12, hipY * 0.95), paint);
-    // Legs (straight, standing)
-    canvas.drawLine(Offset(cx, hipY), Offset(cx - w * 0.06, ankleY), paint);
-    canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
+      canvas.drawCircle(Offset(cx, headY), h * 0.045, paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx, hipY), paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx - w * 0.12, hipY * 0.95), paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx + w * 0.12, hipY * 0.95), paint);
+      canvas.drawLine(Offset(cx, hipY), Offset(cx - w * 0.06, ankleY), paint);
+      canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
+    } else {
+      final cy = h * 0.55;
+      final headX = w * 0.18;
+      final shoulderX = w * 0.32;
+      final hipX = w * 0.62;
+      final ankleX = w * 0.88;
+
+      canvas.drawCircle(Offset(headX, cy - h * 0.02), h * 0.045, paint);
+      canvas.drawLine(Offset(shoulderX, cy), Offset(hipX, cy), paint);
+      canvas.drawLine(Offset(hipX, cy), Offset(ankleX, cy + h * 0.05), paint);
+      canvas.drawLine(Offset(shoulderX, cy), Offset(shoulderX - w * 0.02, cy + h * 0.18), paint);
+    }
+
+    canvas.restore();
   }
 
   @override
-  bool shouldRepaint(covariant ShadowGuidePainter oldDelegate) => false;
+  bool shouldRepaint(covariant ShadowGuidePainter oldDelegate) =>
+      oldDelegate.exercise != exercise || oldDelegate.deviceOrientation != deviceOrientation;
 }
 
 // Draws the skeleton (landmarks + connecting lines) on top of the camera preview
@@ -459,7 +602,6 @@ class SkeletonPainter extends CustomPainter {
     Offset transformPoint(double x, double y) {
       final px = x * scaleX;
       final py = y * scaleY;
-      // Flip the X coordinate to match the mirrored preview.
       return Offset(mirror ? size.width - px : px, py);
     }
 
