@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+import 'services/angle_calculator.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -45,6 +46,8 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   List<Pose> _poses = [];
   bool _isDetecting = false;
   CameraDescription? _selectedCamera;
+  final List<double> _kneeAngleBuffer = [];
+  double _currentKneeAngle = 0;
 
   @override
   void initState() {
@@ -91,9 +94,24 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
       final inputImage = _convertCameraImage(image);
       if (inputImage != null) {
         final poses = await _poseDetector.processImage(inputImage);
+
+        double kneeAngle = _currentKneeAngle;
+        if (poses.isNotEmpty) {
+          final landmarks = poses.first.landmarks;
+          final hip = landmarks[PoseLandmarkType.leftHip];
+          final knee = landmarks[PoseLandmarkType.leftKnee];
+          final ankle = landmarks[PoseLandmarkType.leftAnkle];
+
+          if (hip != null && knee != null && ankle != null) {
+            final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
+            kneeAngle = AngleCalculator.smooth(_kneeAngleBuffer, rawAngle);
+          }
+        }
+
         if (mounted) {
           setState(() {
             _poses = poses;
+            _currentKneeAngle = kneeAngle;
           });
         }
       }
@@ -170,6 +188,18 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                     color: Colors.black54,
                     child: Text(
                       "Landmarks detected: ${_poses.isNotEmpty ? _poses.first.landmarks.length : 0}",
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 50,
+                  left: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    color: Colors.black54,
+                    child: Text(
+                      "Left Knee Angle: ${_currentKneeAngle.toStringAsFixed(1)}°",
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                     ),
                   ),
