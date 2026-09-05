@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'services/angle_calculator.dart';
+import 'services/rep_detector.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -48,6 +49,12 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   CameraDescription? _selectedCamera;
   final List<double> _kneeAngleBuffer = [];
   double _currentKneeAngle = 0;
+  int _repCount = 0;
+  final RepDetector _squatDetector = RepDetector(
+    downThreshold: 110, // knee angle below this = "down" (squatting)
+    upThreshold: 160,   // knee angle above this = "up" (standing)
+    framesToConfirm: 5,
+  );
 
   @override
   void initState() {
@@ -105,6 +112,11 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
           if (hip != null && knee != null && ankle != null) {
             final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
             kneeAngle = AngleCalculator.smooth(_kneeAngleBuffer, rawAngle);
+
+            final repCompleted = _squatDetector.update(kneeAngle);
+            if (repCompleted) {
+              _repCount++;
+            }
           }
         }
 
@@ -202,6 +214,32 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                       "Left Knee Angle: ${_currentKneeAngle.toStringAsFixed(1)}°",
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                     ),
+                  ),
+                ),
+                Positioned(
+                  top: 88,
+                  left: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    color: Colors.black54,
+                    child: Text(
+                      "Squat Reps: $_repCount   (state: ${_squatDetector.state})",
+                      style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 20,
+                  right: 20,
+                  child: FloatingActionButton(
+                    backgroundColor: Colors.teal[700],
+                    onPressed: () {
+                      setState(() {
+                        _repCount = 0;
+                        _squatDetector.reset();
+                      });
+                    },
+                    child: const Icon(Icons.refresh),
                   ),
                 ),
               ],
