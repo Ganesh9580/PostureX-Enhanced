@@ -5,6 +5,7 @@ import 'package:camera/camera.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'services/angle_calculator.dart';
 import 'services/rep_detector.dart';
+import 'services/calibration_manager.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -55,6 +56,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     upThreshold: 160,   // knee angle above this = "up" (standing)
     framesToConfirm: 5,
   );
+  final CalibrationManager _calibration = CalibrationManager(framesToConfirm: 20);
 
   @override
   void initState() {
@@ -113,9 +115,13 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
             final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
             kneeAngle = AngleCalculator.smooth(_kneeAngleBuffer, rawAngle);
 
-            final repCompleted = _squatDetector.update(kneeAngle);
-            if (repCompleted) {
-              _repCount++;
+            if (!_calibration.isCalibrated) {
+              _calibration.checkSquatStart(landmarks);
+            } else {
+              final repCompleted = _squatDetector.update(kneeAngle);
+              if (repCompleted) {
+                _repCount++;
+              }
             }
           }
         }
@@ -192,6 +198,11 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                     mirror: isFrontCamera,
                   ),
                 ),
+                if (!_calibration.isCalibrated)
+                  CustomPaint(
+                    painter: ShadowGuidePainter(),
+                    size: Size.infinite,
+                  ),
                 Positioned(
                   top: 12,
                   left: 12,
@@ -216,32 +227,65 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                     ),
                   ),
                 ),
-                Positioned(
-                  top: 88,
-                  left: 12,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    color: Colors.black54,
-                    child: Text(
-                      "Squat Reps: $_repCount   (state: ${_squatDetector.state})",
-                      style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
+                if (!_calibration.isCalibrated)
+                  Positioned(
+                    bottom: 40,
+                    left: 20,
+                    right: 20,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.tealAccent, width: 1),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            "Match the outline: stand straight, full body visible",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white, fontSize: 14),
+                          ),
+                          const SizedBox(height: 8),
+                          LinearProgressIndicator(
+                            value: _calibration.matchFrameCount / _calibration.framesNeeded,
+                            backgroundColor: Colors.white24,
+                            color: Colors.tealAccent,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                Positioned(
-                  bottom: 20,
-                  right: 20,
-                  child: FloatingActionButton(
-                    backgroundColor: Colors.teal[700],
-                    onPressed: () {
-                      setState(() {
-                        _repCount = 0;
-                        _squatDetector.reset();
-                      });
-                    },
-                    child: const Icon(Icons.refresh),
+                if (_calibration.isCalibrated) ...[
+                  Positioned(
+                    top: 88,
+                    left: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      color: Colors.black54,
+                      child: Text(
+                        "Squat Reps: $_repCount   (state: ${_squatDetector.state})",
+                        style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
+                      ),
+                    ),
                   ),
-                ),
+                  Positioned(
+                    bottom: 20,
+                    right: 20,
+                    child: FloatingActionButton(
+                      backgroundColor: Colors.teal[700],
+                      onPressed: () {
+                        setState(() {
+                          _repCount = 0;
+                          _squatDetector.reset();
+                          _calibration.reset();
+                        });
+                      },
+                      child: const Icon(Icons.refresh),
+                    ),
+                  ),
+                ],
               ],
             )
           : const Center(
@@ -256,6 +300,42 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     final previewSize = _controller!.value.previewSize!;
     return Size(previewSize.height, previewSize.width);
   }
+}
+
+// Draws a translucent dashed outline of the target standing pose, shown
+// during calibration so the user knows exactly how to position themselves.
+class ShadowGuidePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.tealAccent.withOpacity(0.5)
+      ..strokeWidth = 6
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final w = size.width;
+    final h = size.height;
+    final cx = w * 0.5;
+
+    final headY = h * 0.18;
+    final shoulderY = h * 0.26;
+    final hipY = h * 0.52;
+    final ankleY = h * 0.88;
+
+    // Head
+    canvas.drawCircle(Offset(cx, headY), h * 0.045, paint);
+    // Torso
+    canvas.drawLine(Offset(cx, shoulderY), Offset(cx, hipY), paint);
+    // Arms (relaxed at sides)
+    canvas.drawLine(Offset(cx, shoulderY), Offset(cx - w * 0.12, hipY * 0.95), paint);
+    canvas.drawLine(Offset(cx, shoulderY), Offset(cx + w * 0.12, hipY * 0.95), paint);
+    // Legs (straight, standing)
+    canvas.drawLine(Offset(cx, hipY), Offset(cx - w * 0.06, ankleY), paint);
+    canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant ShadowGuidePainter oldDelegate) => false;
 }
 
 // Draws the skeleton (landmarks + connecting lines) on top of the camera preview
