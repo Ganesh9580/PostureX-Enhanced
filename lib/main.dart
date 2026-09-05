@@ -6,6 +6,7 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'services/angle_calculator.dart';
 import 'services/rep_detector.dart';
 import 'services/calibration_manager.dart';
+import 'services/voice_feedback_service.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -57,11 +58,15 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     framesToConfirm: 5,
   );
   final CalibrationManager _calibration = CalibrationManager(framesToConfirm: 20);
+  final VoiceFeedbackService _voice = VoiceFeedbackService();
+  bool _backWarnedThisRep = false;
+  bool _hasAnnouncedStart = false;
 
   @override
   void initState() {
     super.initState();
     _poseDetector = PoseDetector(options: PoseDetectorOptions());
+    _voice.init();
     _initCamera();
   }
 
@@ -111,16 +116,39 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
           final knee = landmarks[PoseLandmarkType.leftKnee];
           final ankle = landmarks[PoseLandmarkType.leftAnkle];
 
+          final shoulder = landmarks[PoseLandmarkType.leftShoulder];
+
           if (hip != null && knee != null && ankle != null) {
             final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
             kneeAngle = AngleCalculator.smooth(_kneeAngleBuffer, rawAngle);
 
             if (!_calibration.isCalibrated) {
-              _calibration.checkSquatStart(landmarks);
+              final justCalibrated = _calibration.checkSquatStart(landmarks);
+              if (justCalibrated) {
+                _voice.speak("Position matched. Start!", force: true, minGapMs: 0);
+              }
             } else {
+              if (!_hasAnnouncedStart) {
+                _hasAnnouncedStart = true;
+              }
+
+              // Mid-rep back-straightness check, only meaningful during the "down" phase
+              if (shoulder != null && _squatDetector.state == "down") {
+                final backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
+                if (backAngle < 145 && !_backWarnedThisRep) {
+                  _voice.speak("Stop. Straighten your back.", force: true, minGapMs: 1200);
+                  _backWarnedThisRep = true;
+                }
+              }
+
+              final wasDown = _squatDetector.state == "down";
               final repCompleted = _squatDetector.update(kneeAngle);
+              if (wasDown == false && _squatDetector.state == "down") {
+                _backWarnedThisRep = false; // reset warning flag on entering a new "down" phase
+              }
               if (repCompleted) {
                 _repCount++;
+                _voice.speak("$_repCount", force: true, minGapMs: 0);
               }
             }
           }
@@ -170,6 +198,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     _controller?.stopImageStream();
     _controller?.dispose();
     _poseDetector.close();
+    _voice.dispose();
     super.dispose();
   }
 
@@ -280,6 +309,8 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                           _repCount = 0;
                           _squatDetector.reset();
                           _calibration.reset();
+                          _backWarnedThisRep = false;
+                          _hasAnnouncedStart = false;
                         });
                       },
                       child: const Icon(Icons.refresh),
