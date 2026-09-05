@@ -7,6 +7,7 @@ import 'services/angle_calculator.dart';
 import 'services/rep_detector.dart';
 import 'services/calibration_manager.dart';
 import 'services/voice_feedback_service.dart';
+import 'services/form_scorer.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -61,6 +62,10 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   final VoiceFeedbackService _voice = VoiceFeedbackService();
   bool _backWarnedThisRep = false;
   bool _hasAnnouncedStart = false;
+  final List<double> _scores = [];
+  double _minBackAngleThisRep = 200;
+  static const int _sessionGoal = 10;
+  bool _sessionComplete = false;
 
   @override
   void initState() {
@@ -101,7 +106,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   }
 
   void _processCameraImage(CameraImage image) async {
-    if (_isDetecting) return;
+    if (_isDetecting || _sessionComplete) return;
     _isDetecting = true;
 
     try {
@@ -135,6 +140,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
               // Mid-rep back-straightness check, only meaningful during the "down" phase
               if (shoulder != null && _squatDetector.state == "down") {
                 final backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
+                _minBackAngleThisRep = backAngle < _minBackAngleThisRep ? backAngle : _minBackAngleThisRep;
                 if (backAngle < 145 && !_backWarnedThisRep) {
                   _voice.speak("Stop. Straighten your back.", force: true, minGapMs: 1200);
                   _backWarnedThisRep = true;
@@ -142,13 +148,31 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
               }
 
               final wasDown = _squatDetector.state == "down";
+              final depthAtRepEnd = _squatDetector.extremeAngle;
               final repCompleted = _squatDetector.update(kneeAngle);
               if (wasDown == false && _squatDetector.state == "down") {
                 _backWarnedThisRep = false; // reset warning flag on entering a new "down" phase
+                _minBackAngleThisRep = 200; // reset for the new rep
               }
               if (repCompleted) {
                 _repCount++;
+                final score = FormScorer.scoreSquat(
+                  depthAngle: depthAtRepEnd ?? 90,
+                  backAngle: _minBackAngleThisRep == 200 ? 150 : _minBackAngleThisRep,
+                );
+                _scores.add(score);
                 _voice.speak("$_repCount", force: true, minGapMs: 0);
+
+                if (_repCount >= _sessionGoal) {
+                  _sessionComplete = true;
+                  Future.delayed(const Duration(milliseconds: 900), () {
+                    _voice.speak(
+                      "Session complete! You finished all $_sessionGoal reps. Excellent work!",
+                      force: true,
+                      minGapMs: 0,
+                    );
+                  });
+                }
               }
             }
           }
@@ -294,11 +318,24 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       color: Colors.black54,
                       child: Text(
-                        "Squat Reps: $_repCount   (state: ${_squatDetector.state})",
+                        "Squat Reps: $_repCount / $_sessionGoal   (state: ${_squatDetector.state})",
                         style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ),
+                  if (_scores.isNotEmpty)
+                    Positioned(
+                      top: 126,
+                      left: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        color: Colors.black54,
+                        child: Text(
+                          "Avg Score: ${(_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}   Best: ${_scores.reduce((a, b) => a > b ? a : b).toStringAsFixed(1)}",
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ),
                   Positioned(
                     bottom: 20,
                     right: 20,
@@ -311,12 +348,40 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                           _calibration.reset();
                           _backWarnedThisRep = false;
                           _hasAnnouncedStart = false;
+                          _scores.clear();
+                          _minBackAngleThisRep = 200;
+                          _sessionComplete = false;
                         });
                       },
                       child: const Icon(Icons.refresh),
                     ),
                   ),
                 ],
+                if (_sessionComplete)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black87,
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.emoji_events, color: Colors.amber, size: 64),
+                            const SizedBox(height: 16),
+                            const Text(
+                              "Session Complete!",
+                              style: TextStyle(color: Colors.amber, fontSize: 26, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              "You finished all $_sessionGoal reps.\nAvg Score: ${_scores.isEmpty ? '-' : (_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}",
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontSize: 16),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             )
           : const Center(
