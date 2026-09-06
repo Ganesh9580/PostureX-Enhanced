@@ -9,6 +9,8 @@ import 'services/calibration_manager.dart';
 import 'services/voice_feedback_service.dart';
 import 'services/form_scorer.dart';
 import 'services/hold_timer.dart';
+import 'services/database_service.dart';
+import 'services/points_service.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -91,13 +93,53 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   double? _chestHeightBaseline;
   bool _plankFormBroken = false;
 
+  // Points & persistence
+  final DatabaseService _db = DatabaseService();
+  int _totalPoints = 0;
+  bool _isPremiumUnlocked = false;
+  int _sessionPointsEarned = 0;
+
   @override
   void initState() {
     super.initState();
     _poseDetector = PoseDetector(options: PoseDetectorOptions());
     _repDetector = _buildRepDetector(_selectedExercise);
     _voice.init();
+    _loadPoints();
     _initCamera();
+  }
+
+  Future<void> _loadPoints() async {
+    final points = await _db.getTotalPoints();
+    final unlocked = await _db.isPremiumUnlocked();
+    if (mounted) {
+      setState(() {
+        _totalPoints = points;
+        _isPremiumUnlocked = unlocked;
+      });
+    }
+  }
+
+  Future<void> _awardPoints(int amount) async {
+    final oldTotal = _totalPoints;
+    final newTotal = await _db.addPoints(amount);
+    if (!mounted) return;
+    setState(() {
+      _totalPoints = newTotal;
+      _sessionPointsEarned += amount;
+    });
+
+    if (!_isPremiumUnlocked && PointsService.crossesUnlockThreshold(oldTotal, newTotal)) {
+      await _db.setPremiumUnlocked();
+      setState(() {
+        _isPremiumUnlocked = true;
+      });
+      _voice.speak(
+        "Congratulations! You've unlocked the Premium Module!",
+        force: true,
+        minGapMs: 0,
+      );
+    }
   }
 
   void _showBanner(String message) {
@@ -127,6 +169,7 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
       _holdTimer.reset();
       _chestHeightBaseline = null;
       _plankFormBroken = false;
+      _sessionPointsEarned = 0;
     });
   }
 
@@ -279,9 +322,18 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
             : FormScorer.scorePushup(depthAngle: depthAtRepEnd ?? 75, bodyLineAngle: secondaryForScore);
         _scores.add(score);
         _voice.speak("$_repCount", force: true, minGapMs: 0);
+        _awardPoints(PointsService.pointsForRep(score));
 
         if (_repCount >= cfg.goal) {
           _sessionComplete = true;
+          _awardPoints(PointsService.sessionBonus(false));
+          final avgScore = _scores.reduce((a, b) => a + b) / _scores.length;
+          _db.saveSession(
+            exercise: cfg.label,
+            resultValue: _repCount.toDouble(),
+            avgScore: avgScore,
+            pointsEarned: _sessionPointsEarned + PointsService.sessionBonus(false),
+          );
           Future.delayed(const Duration(milliseconds: 900), () {
             _voice.speak(
               "Session complete! You finished all ${cfg.goal} reps. Excellent work!",
@@ -338,6 +390,14 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     final reachedGoal = _holdTimer.update(isGoodForm, cfg.goal.toDouble());
     if (reachedGoal) {
       _sessionComplete = true;
+      final bonus = PointsService.sessionBonus(true);
+      _awardPoints(bonus);
+      _db.saveSession(
+        exercise: cfg.label,
+        resultValue: _holdTimer.heldSeconds,
+        avgScore: null,
+        pointsEarned: bonus,
+      );
       Future.delayed(const Duration(milliseconds: 300), () {
         _voice.speak(
           "Session complete! You held a perfect plank. Excellent work!",
@@ -394,7 +454,30 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
         backgroundColor: Colors.teal[800],
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 12),
+            padding: const EdgeInsets.only(right: 4),
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.star, color: Colors.amber, size: 16),
+                    const SizedBox(width: 4),
+                    Text(
+                      _isPremiumUnlocked ? "$_totalPoints" : "$_totalPoints/${PointsService.unlockThreshold}",
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 12, left: 8),
             child: Center(
               child: DropdownButton<ExerciseType>(
                 value: _selectedExercise,
@@ -555,6 +638,26 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                               style: const TextStyle(color: Colors.white, fontSize: 16),
                             ),
                             const SizedBox(height: 16),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                "+ $_sessionPointsEarned points earned",
+                                style: const TextStyle(color: Colors.amber, fontSize: 15, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            if (_isPremiumUnlocked)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 8),
+                                child: Text(
+                                  "Premium Module Unlocked!",
+                                  style: TextStyle(color: Colors.greenAccent, fontSize: 14, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            const SizedBox(height: 16),
                             ElevatedButton(
                               onPressed: _resetSession,
                               child: const Text("Try Again"),
@@ -614,6 +717,10 @@ class ShadowGuidePainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
 
+    final markerPaint = Paint()
+      ..color = Colors.tealAccent.withOpacity(0.6)
+      ..style = PaintingStyle.fill;
+
     final w = size.width;
     final h = size.height;
 
@@ -632,33 +739,36 @@ class ShadowGuidePainter extends CustomPainter {
       canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
     } else if (exercise == ExerciseType.pushup) {
       // Diagonal, top-to-bottom figure that fits naturally within a normal
-      // portrait frame — no need to physically rotate the phone. This is
-      // roughly how a phone propped nearby would actually see someone in
-      // push-up position on the floor.
-      final headX = w * 0.22, headY = h * 0.16;
-      final shoulderX = w * 0.30, shoulderY = h * 0.24;
-      final hipX = w * 0.52, hipY = h * 0.52;
-      final ankleX = w * 0.78, ankleY = h * 0.84;
+      // portrait frame — no need to physically rotate the phone.
+      final headX = w * 0.20, headY = h * 0.13;
+      final shoulderX = w * 0.27, shoulderY = h * 0.20;
+      final hipX = w * 0.50, hipY = h * 0.48;
+      final ankleX = w * 0.76, ankleY = h * 0.80;
+      final handX = shoulderX - w * 0.01, handY = shoulderY + h * 0.20;
 
-      canvas.drawCircle(Offset(headX, headY), h * 0.04, paint);
+      canvas.drawCircle(Offset(headX, headY), h * 0.035, paint);
       canvas.drawLine(Offset(shoulderX, shoulderY), Offset(hipX, hipY), paint);
       canvas.drawLine(Offset(hipX, hipY), Offset(ankleX, ankleY), paint);
-      // Straight arm down to the floor
-      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(shoulderX - w * 0.03, shoulderY + h * 0.16), paint);
+      // Near-vertical extended arm supporting the body, with a hand marker
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(handX, handY), paint);
+      canvas.drawCircle(Offset(handX, handY), 5, markerPaint);
+      canvas.drawCircle(Offset(ankleX, ankleY), 5, markerPaint);
     } else {
-      // Plank: same diagonal top-to-bottom framing, with a bent forearm
-      // instead of a straight arm.
-      final headX = w * 0.22, headY = h * 0.16;
-      final shoulderX = w * 0.30, shoulderY = h * 0.24;
-      final hipX = w * 0.52, hipY = h * 0.52;
-      final ankleX = w * 0.78, ankleY = h * 0.84;
+      // Plank: same clean diagonal framing, with a bent forearm instead of
+      // a straight arm.
+      final headX = w * 0.20, headY = h * 0.13;
+      final shoulderX = w * 0.27, shoulderY = h * 0.20;
+      final hipX = w * 0.50, hipY = h * 0.48;
+      final ankleX = w * 0.76, ankleY = h * 0.80;
+      final elbowX = shoulderX - w * 0.005, elbowY = shoulderY + h * 0.11;
+      final forearmX = elbowX - w * 0.07, forearmY = elbowY + h * 0.01;
 
-      canvas.drawCircle(Offset(headX, headY), h * 0.04, paint);
+      canvas.drawCircle(Offset(headX, headY), h * 0.035, paint);
       canvas.drawLine(Offset(shoulderX, shoulderY), Offset(hipX, hipY), paint);
       canvas.drawLine(Offset(hipX, hipY), Offset(ankleX, ankleY), paint);
-      // Bent forearm to the floor (elbow ~90°)
-      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(shoulderX - w * 0.02, shoulderY + h * 0.10), paint);
-      canvas.drawLine(Offset(shoulderX - w * 0.02, shoulderY + h * 0.10), Offset(shoulderX - w * 0.09, shoulderY + h * 0.11), paint);
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(elbowX, elbowY), paint);
+      canvas.drawLine(Offset(elbowX, elbowY), Offset(forearmX, forearmY), paint);
+      canvas.drawCircle(Offset(ankleX, ankleY), 5, markerPaint);
     }
 
     canvas.restore();
