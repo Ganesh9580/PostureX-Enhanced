@@ -1,7 +1,7 @@
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'angle_calculator.dart';
 
-enum ExerciseType { squat, pushup }
+enum ExerciseType { squat, pushup, plank }
 
 /// Handles the "match the shadow guide" calibration step before real
 /// tracking begins. The user must hold a target starting pose for a
@@ -30,6 +30,9 @@ class CalibrationManager {
         break;
       case ExerciseType.pushup:
         matches = _checkPushupStart(landmarks);
+        break;
+      case ExerciseType.plank:
+        matches = _checkPlankStart(landmarks);
         break;
     }
 
@@ -73,6 +76,22 @@ class CalibrationManager {
     final bodyLineAngle = AngleCalculator.calculateAngle(shoulder, hip, ankle);
 
     return elbowAngle >= 155 && bodyLineAngle >= 155;
+  }
+
+  bool _checkPlankStart(Map<PoseLandmarkType, PoseLandmark?> landmarks) {
+    final shoulder = landmarks[PoseLandmarkType.leftShoulder];
+    final elbow = landmarks[PoseLandmarkType.leftElbow];
+    final wrist = landmarks[PoseLandmarkType.leftWrist];
+    final hip = landmarks[PoseLandmarkType.leftHip];
+    final ankle = landmarks[PoseLandmarkType.leftAnkle];
+
+    if (shoulder == null || elbow == null || wrist == null || hip == null || ankle == null) return false;
+
+    // Forearm plank: elbow bent to roughly 70-110°, body forms a straight line
+    final elbowAngle = AngleCalculator.calculateAngle(shoulder, elbow, wrist);
+    final bodyLineAngle = AngleCalculator.calculateAngle(shoulder, hip, ankle);
+
+    return elbowAngle >= 60 && elbowAngle <= 120 && bodyLineAngle >= 155;
   }
 
   void reset() {

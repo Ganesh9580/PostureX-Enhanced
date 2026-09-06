@@ -8,6 +8,7 @@ import 'services/rep_detector.dart';
 import 'services/calibration_manager.dart';
 import 'services/voice_feedback_service.dart';
 import 'services/form_scorer.dart';
+import 'services/hold_timer.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -34,21 +35,24 @@ class MyApp extends StatelessWidget {
 // Per-exercise configuration: thresholds, goal, and ideal target angles.
 class ExerciseConfig {
   final String label;
-  final int goal;
+  final int goal; // reps for squat/pushup, seconds for plank
   final double downThreshold;
   final double upThreshold;
+  final bool isHoldBased;
 
   const ExerciseConfig({
     required this.label,
     required this.goal,
-    required this.downThreshold,
-    required this.upThreshold,
+    this.downThreshold = 0,
+    this.upThreshold = 0,
+    this.isHoldBased = false,
   });
 }
 
 const Map<ExerciseType, ExerciseConfig> exerciseConfigs = {
   ExerciseType.squat: ExerciseConfig(label: "Squats", goal: 10, downThreshold: 110, upThreshold: 160),
   ExerciseType.pushup: ExerciseConfig(label: "Push-ups", goal: 5, downThreshold: 95, upThreshold: 155),
+  ExerciseType.plank: ExerciseConfig(label: "Plank", goal: 20, isHoldBased: true),
 };
 
 class PoseTrackingScreen extends StatefulWidget {
@@ -81,6 +85,11 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
   bool _sessionComplete = false;
   String? _statusBanner;
   Timer? _bannerTimer;
+
+  // Plank-specific state
+  final HoldTimer _holdTimer = HoldTimer();
+  double? _chestHeightBaseline;
+  bool _plankFormBroken = false;
 
   @override
   void initState() {
@@ -115,6 +124,9 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
       _minSecondaryAngleThisRep = 200;
       _scores.clear();
       _sessionComplete = false;
+      _holdTimer.reset();
+      _chestHeightBaseline = null;
+      _plankFormBroken = false;
     });
   }
 
@@ -175,7 +187,9 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
               _voice.speak("Position matched. Start!", force: true, minGapMs: 0);
             }
           } else {
-            currentAngle = _handleActiveTracking(landmarks) ?? currentAngle;
+            currentAngle = _selectedExercise == ExerciseType.plank
+                ? _handlePlankTracking(landmarks) ?? currentAngle
+                : _handleActiveTracking(landmarks) ?? currentAngle;
           }
         }
 
@@ -280,6 +294,60 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
     }
 
     return angle;
+  }
+
+  /// Plank uses a hold-timer instead of rep counting. Body-line angle alone
+  /// can't distinguish an elevated plank from lying flat on the ground
+  /// (both look like a straight line to the camera), so this also tracks
+  /// chest height (average of shoulder+hip vertical position) against a
+  /// baseline captured right after calibration — a significant drop means
+  /// the user has collapsed, not just that the angle changed slightly.
+  double? _handlePlankTracking(Map<PoseLandmarkType, PoseLandmark?> landmarks) {
+    final cfg = exerciseConfigs[ExerciseType.plank]!;
+    final shoulder = landmarks[PoseLandmarkType.leftShoulder];
+    final elbow = landmarks[PoseLandmarkType.leftElbow];
+    final wrist = landmarks[PoseLandmarkType.leftWrist];
+    final hip = landmarks[PoseLandmarkType.leftHip];
+    final ankle = landmarks[PoseLandmarkType.leftAnkle];
+
+    if (shoulder == null || elbow == null || wrist == null || hip == null || ankle == null) {
+      return null;
+    }
+
+    final bodyLineAngle = AngleCalculator.calculateAngle(shoulder, hip, ankle);
+    final elbowAngle = AngleCalculator.calculateAngle(shoulder, elbow, wrist);
+
+    final chestHeight = (shoulder.y + hip.y) / 2;
+    _chestHeightBaseline ??= chestHeight;
+    final dropFromBaseline = chestHeight - _chestHeightBaseline!; // larger = lower on screen = collapsed
+
+    final angleOk = bodyLineAngle > 155 && elbowAngle >= 50 && elbowAngle <= 130;
+    final notCollapsed = dropFromBaseline < 60; // pixel-ish threshold in normalized landmark units
+    final isGoodForm = angleOk && notCollapsed;
+
+    if (!isGoodForm && !_plankFormBroken) {
+      _plankFormBroken = true;
+      final message = !notCollapsed
+          ? "Form broken. You've dropped too low — lift back up."
+          : "Form broken. Straighten your body to continue.";
+      _voice.speak(message, force: true, minGapMs: 2000);
+    } else if (isGoodForm && _plankFormBroken) {
+      _plankFormBroken = false;
+    }
+
+    final reachedGoal = _holdTimer.update(isGoodForm, cfg.goal.toDouble());
+    if (reachedGoal) {
+      _sessionComplete = true;
+      Future.delayed(const Duration(milliseconds: 300), () {
+        _voice.speak(
+          "Session complete! You held a perfect plank. Excellent work!",
+          force: true,
+          minGapMs: 0,
+        );
+      });
+    }
+
+    return bodyLineAngle;
   }
 
   InputImage? _convertCameraImage(CameraImage image) {
@@ -410,7 +478,9 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                           Text(
                             _selectedExercise == ExerciseType.squat
                                 ? "Match the outline: stand straight, full body visible"
-                                : "Match the outline: top push-up position, side-on view",
+                                : _selectedExercise == ExerciseType.pushup
+                                    ? "Match the outline: top push-up position, side-on view"
+                                    : "Match the outline: forearm plank position, side-on view",
                             textAlign: TextAlign.center,
                             style: const TextStyle(color: Colors.white, fontSize: 14),
                           ),
@@ -432,7 +502,9 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       color: Colors.black54,
                       child: Text(
-                        "${cfg.label} Reps: $_repCount / ${cfg.goal}   (state: ${_repDetector.state})",
+                        cfg.isHoldBased
+                            ? "${cfg.label} Held: ${_holdTimer.heldSeconds.toStringAsFixed(1)}s / ${cfg.goal}s   (${_plankFormBroken ? 'paused' : 'holding'})"
+                            : "${cfg.label} Reps: $_repCount / ${cfg.goal}   (state: ${_repDetector.state})",
                         style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -476,7 +548,9 @@ class _PoseTrackingScreenState extends State<PoseTrackingScreen> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              "You finished all ${cfg.goal} ${cfg.label}.\nAvg Score: ${_scores.isEmpty ? '-' : (_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}",
+                              cfg.isHoldBased
+                                  ? "You held a perfect ${cfg.label} for ${cfg.goal} seconds."
+                                  : "You finished all ${cfg.goal} ${cfg.label}.\nAvg Score: ${_scores.isEmpty ? '-' : (_scores.reduce((a, b) => a + b) / _scores.length).toStringAsFixed(1)}",
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.white, fontSize: 16),
                             ),
@@ -556,17 +630,35 @@ class ShadowGuidePainter extends CustomPainter {
       canvas.drawLine(Offset(cx, shoulderY), Offset(cx + w * 0.12, hipY * 0.95), paint);
       canvas.drawLine(Offset(cx, hipY), Offset(cx - w * 0.06, ankleY), paint);
       canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
-    } else {
-      final cy = h * 0.55;
-      final headX = w * 0.18;
-      final shoulderX = w * 0.32;
-      final hipX = w * 0.62;
-      final ankleX = w * 0.88;
+    } else if (exercise == ExerciseType.pushup) {
+      // Diagonal, top-to-bottom figure that fits naturally within a normal
+      // portrait frame — no need to physically rotate the phone. This is
+      // roughly how a phone propped nearby would actually see someone in
+      // push-up position on the floor.
+      final headX = w * 0.22, headY = h * 0.16;
+      final shoulderX = w * 0.30, shoulderY = h * 0.24;
+      final hipX = w * 0.52, hipY = h * 0.52;
+      final ankleX = w * 0.78, ankleY = h * 0.84;
 
-      canvas.drawCircle(Offset(headX, cy - h * 0.02), h * 0.045, paint);
-      canvas.drawLine(Offset(shoulderX, cy), Offset(hipX, cy), paint);
-      canvas.drawLine(Offset(hipX, cy), Offset(ankleX, cy + h * 0.05), paint);
-      canvas.drawLine(Offset(shoulderX, cy), Offset(shoulderX - w * 0.02, cy + h * 0.18), paint);
+      canvas.drawCircle(Offset(headX, headY), h * 0.04, paint);
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(hipX, hipY), paint);
+      canvas.drawLine(Offset(hipX, hipY), Offset(ankleX, ankleY), paint);
+      // Straight arm down to the floor
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(shoulderX - w * 0.03, shoulderY + h * 0.16), paint);
+    } else {
+      // Plank: same diagonal top-to-bottom framing, with a bent forearm
+      // instead of a straight arm.
+      final headX = w * 0.22, headY = h * 0.16;
+      final shoulderX = w * 0.30, shoulderY = h * 0.24;
+      final hipX = w * 0.52, hipY = h * 0.52;
+      final ankleX = w * 0.78, ankleY = h * 0.84;
+
+      canvas.drawCircle(Offset(headX, headY), h * 0.04, paint);
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(hipX, hipY), paint);
+      canvas.drawLine(Offset(hipX, hipY), Offset(ankleX, ankleY), paint);
+      // Bent forearm to the floor (elbow ~90°)
+      canvas.drawLine(Offset(shoulderX, shoulderY), Offset(shoulderX - w * 0.02, shoulderY + h * 0.10), paint);
+      canvas.drawLine(Offset(shoulderX - w * 0.02, shoulderY + h * 0.10), Offset(shoulderX - w * 0.09, shoulderY + h * 0.11), paint);
     }
 
     canvas.restore();
