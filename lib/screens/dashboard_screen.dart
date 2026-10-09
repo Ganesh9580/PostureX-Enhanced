@@ -64,16 +64,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0F1115),
       appBar: AppBar(
-        title: Row(
-          children: [
-            const Icon(Icons.bolt, color: Colors.tealAccent),
-            const SizedBox(width: 8),
-            Text(
-              "Welcome back, ${_profile.nickname ?? _profile.name}!",
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-          ],
+
+title: Row(
+  children: [
+    Image.asset(
+      'assets/branding/posturex_logo.png',
+      width: 38,
+      height: 38,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) {
+        return const Icon(
+          Icons.fitness_center,
+          color: Colors.tealAccent,
+          size: 28,
+        );
+      },
+    ),
+    const SizedBox(width: 10),
+    Expanded(
+      child: Text(
+        "Welcome back, ${_profile.nickname ?? _profile.name}!",
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
         ),
+      ),
+    ),
+  ],
+),
+
         backgroundColor: const Color(0xFF161A21),
         elevation: 0,
       ),

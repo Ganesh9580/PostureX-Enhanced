@@ -319,6 +319,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
 
     if (s1 != null && s2 != null && s3 != null && _repDetector.state == "down") {
       final secondaryAngle = AngleCalculator.calculateAngle(s1, s2, s3);
+
       _minSecondaryAngleThisRep =
           secondaryAngle < _minSecondaryAngleThisRep ? secondaryAngle : _minSecondaryAngleThisRep;
 
@@ -529,7 +530,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
     if (_repDetector.state == "down") {
       final backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
       _minSecondaryAngleThisRep = backAngle < _minSecondaryAngleThisRep ? backAngle : _minSecondaryAngleThisRep;
-      if (backAngle < 145 && !_formWarnedThisRep) {
+      if (backAngle < 105 && !_formWarnedThisRep) {
         _voice.speak("Stop. Straighten your back.", force: true, minGapMs: 1200);
         _formWarnedThisRep = true;
       }

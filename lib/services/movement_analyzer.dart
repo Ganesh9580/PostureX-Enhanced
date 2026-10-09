@@ -83,11 +83,8 @@ class MovementAnalyzer {
     String? warning;
 
     if (shoulder != null) {
-      backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
-      if (backAngle < 140) {
-        warning = "Straighten your back";
-      }
-    }
+  backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
+}
 
     return AnalysisFrame(primaryAngle: kneeAngle, secondaryAngle: backAngle, formWarning: warning);
   }

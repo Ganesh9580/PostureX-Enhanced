@@ -9,6 +9,14 @@ import '../models/workout_routine.dart';
 /// personal records, session history, and workout routines using SQLite (sqflite).
 class DatabaseService {
   static Database? _db;
+  static String? testDatabasePath;
+  static Future<void> resetForTesting() async {
+    final db = _db;
+    _db = null;
+    if (db != null && db.isOpen) {
+      await db.close();
+    }
+  }
 
   Future<Database> get database async {
     if (_db != null) return _db!;
@@ -18,7 +26,7 @@ class DatabaseService {
 
   Future<Database> _initDb() async {
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'posture_coach.db');
+    final path = testDatabasePath ?? join(dbPath, 'posture_coach.db');
 
     return openDatabase(
       path,
@@ -29,19 +37,19 @@ class DatabaseService {
         await _createV3Tables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-  if (oldVersion < 2) {
-    await _createV2Tables(db);
-  }
+        if (oldVersion < 2) {
+          await _createV2Tables(db);
+        }
 
-  if (oldVersion < 3) {
-    await _createV3Tables(db);
-  }
-},
-onOpen: (db) async {
-  // Repair missing tables in databases created by older app versions.
-  await _createV2Tables(db);
-  await _createV3Tables(db);
-},
+        if (oldVersion < 3) {
+          await _createV3Tables(db);
+        }
+      },
+      onOpen: (db) async {
+        // Repair missing tables in databases created by older app versions.
+        await _createV2Tables(db);
+        await _createV3Tables(db);
+      },
     );
   }
 
@@ -63,7 +71,11 @@ onOpen: (db) async {
         timestamp TEXT NOT NULL
       )
     ''');
-    await db.insert('app_state', {'id': 1, 'total_points': 0, 'premium_unlocked': 0});
+    await db.insert('app_state', {
+      'id': 1,
+      'total_points': 0,
+      'premium_unlocked': 0,
+    });
   }
 
   static Future<void> _createV2Tables(Database db) async {
@@ -127,64 +139,173 @@ onOpen: (db) async {
       {
         'id': 'routine_full_body_flow',
         'name': 'Beginner Full Body Flow',
-        'description': 'Balanced introduction targeting squats, biceps, calf raises, and standing knees.',
+        'description':
+            'Balanced introduction targeting squats, biceps, calf raises, and standing knees.',
         'difficulty': 'beginner',
         'fitness_goal': 'generalFitness',
         'estimated_minutes': 15,
         'is_custom': 0,
         'created_at': now,
         'exercises_json': jsonEncode([
-          {'exercise_id': 'squat', 'exercise_name': 'Squats', 'target_reps': 10, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'biceps_curl', 'exercise_name': 'Biceps Curls', 'target_reps': 10, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'calf_raise', 'exercise_name': 'Calf Raises', 'target_reps': 12, 'target_hold_seconds': 0.0, 'sets': 2, 'rest_seconds': 20},
-          {'exercise_id': 'standing_knee_raises', 'exercise_name': 'Standing Knee Raises', 'target_reps': 12, 'target_hold_seconds': 0.0, 'sets': 2, 'rest_seconds': 20},
+          {
+            'exercise_id': 'squat',
+            'exercise_name': 'Squats',
+            'target_reps': 10,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'biceps_curl',
+            'exercise_name': 'Biceps Curls',
+            'target_reps': 10,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'calf_raise',
+            'exercise_name': 'Calf Raises',
+            'target_reps': 12,
+            'target_hold_seconds': 0.0,
+            'sets': 2,
+            'rest_seconds': 20,
+          },
+          {
+            'exercise_id': 'standing_knee_raises',
+            'exercise_name': 'Standing Knee Raises',
+            'target_reps': 12,
+            'target_hold_seconds': 0.0,
+            'sets': 2,
+            'rest_seconds': 20,
+          },
         ]),
       },
       {
         'id': 'routine_core_posture',
         'name': 'Core Stability & Posture Pro',
-        'description': 'Focused isometric hold flow designed to strengthen abdominal wall and back posture.',
+        'description':
+            'Focused isometric hold flow designed to strengthen abdominal wall and back posture.',
         'difficulty': 'intermediate',
         'fitness_goal': 'mobility',
         'estimated_minutes': 15,
         'is_custom': 0,
         'created_at': now,
         'exercises_json': jsonEncode([
-          {'exercise_id': 'plank', 'exercise_name': 'Plank', 'target_reps': 0, 'target_hold_seconds': 20.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'chair_pose', 'exercise_name': 'Chair Pose', 'target_reps': 0, 'target_hold_seconds': 15.0, 'sets': 2, 'rest_seconds': 25},
-          {'exercise_id': 'tree_pose', 'exercise_name': 'Tree Pose', 'target_reps': 0, 'target_hold_seconds': 15.0, 'sets': 2, 'rest_seconds': 20},
-          {'exercise_id': 'forward_bend', 'exercise_name': 'Standing Forward Bend', 'target_reps': 0, 'target_hold_seconds': 15.0, 'sets': 2, 'rest_seconds': 20},
+          {
+            'exercise_id': 'plank',
+            'exercise_name': 'Plank',
+            'target_reps': 0,
+            'target_hold_seconds': 20.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'chair_pose',
+            'exercise_name': 'Chair Pose',
+            'target_reps': 0,
+            'target_hold_seconds': 15.0,
+            'sets': 2,
+            'rest_seconds': 25,
+          },
+          {
+            'exercise_id': 'tree_pose',
+            'exercise_name': 'Tree Pose',
+            'target_reps': 0,
+            'target_hold_seconds': 15.0,
+            'sets': 2,
+            'rest_seconds': 20,
+          },
+          {
+            'exercise_id': 'forward_bend',
+            'exercise_name': 'Standing Forward Bend',
+            'target_reps': 0,
+            'target_hold_seconds': 15.0,
+            'sets': 2,
+            'rest_seconds': 20,
+          },
         ]),
       },
       {
         'id': 'routine_upper_strength',
         'name': 'Upper Body Strength Builder',
-        'description': 'High-intensity push-ups, lateral raises, and shoulder presses for upper body power.',
+        'description':
+            'High-intensity push-ups, lateral raises, and shoulder presses for upper body power.',
         'difficulty': 'intermediate',
         'fitness_goal': 'strength',
         'estimated_minutes': 20,
         'is_custom': 0,
         'created_at': now,
         'exercises_json': jsonEncode([
-          {'exercise_id': 'pushup', 'exercise_name': 'Push-ups', 'target_reps': 8, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 45},
-          {'exercise_id': 'lateral_raise', 'exercise_name': 'Lateral Raises', 'target_reps': 10, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'shoulder_press', 'exercise_name': 'Shoulder Press', 'target_reps': 10, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'biceps_curl', 'exercise_name': 'Biceps Curls', 'target_reps': 12, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
+          {
+            'exercise_id': 'pushup',
+            'exercise_name': 'Push-ups',
+            'target_reps': 8,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 45,
+          },
+          {
+            'exercise_id': 'lateral_raise',
+            'exercise_name': 'Lateral Raises',
+            'target_reps': 10,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'shoulder_press',
+            'exercise_name': 'Shoulder Press',
+            'target_reps': 10,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'biceps_curl',
+            'exercise_name': 'Biceps Curls',
+            'target_reps': 12,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
         ]),
       },
       {
         'id': 'routine_cardio_blast',
         'name': 'High-Intensity Cardio Blast',
-        'description': 'Fast-paced high knees, jumping jacks, and jump squats to maximize endurance.',
+        'description':
+            'Fast-paced high knees, jumping jacks, and jump squats to maximize endurance.',
         'difficulty': 'advanced',
         'fitness_goal': 'endurance',
         'estimated_minutes': 20,
         'is_custom': 0,
         'created_at': now,
         'exercises_json': jsonEncode([
-          {'exercise_id': 'high_knees', 'exercise_name': 'High Knees', 'target_reps': 20, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'jumping_jack', 'exercise_name': 'Jumping Jacks', 'target_reps': 15, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 30},
-          {'exercise_id': 'jump_squat', 'exercise_name': 'Jump Squats', 'target_reps': 10, 'target_hold_seconds': 0.0, 'sets': 3, 'rest_seconds': 40},
+          {
+            'exercise_id': 'high_knees',
+            'exercise_name': 'High Knees',
+            'target_reps': 20,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'jumping_jack',
+            'exercise_name': 'Jumping Jacks',
+            'target_reps': 15,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 30,
+          },
+          {
+            'exercise_id': 'jump_squat',
+            'exercise_name': 'Jump Squats',
+            'target_reps': 10,
+            'target_hold_seconds': 0.0,
+            'sets': 3,
+            'rest_seconds': 40,
+          },
         ]),
       },
     ];
@@ -249,7 +370,10 @@ onOpen: (db) async {
 
   Future<List<WorkoutRoutine>> getWorkoutRoutines() async {
     final db = await database;
-    final rows = await db.query('workout_routines', orderBy: 'is_custom DESC, name ASC');
+    final rows = await db.query(
+      'workout_routines',
+      orderBy: 'is_custom DESC, name ASC',
+    );
     return rows.map((r) => WorkoutRoutine.fromMap(r)).toList();
   }
 
@@ -264,7 +388,11 @@ onOpen: (db) async {
 
   Future<void> deleteWorkoutRoutine(String id) async {
     final db = await database;
-    await db.delete('workout_routines', where: 'id = ? AND is_custom = 1', whereArgs: [id]);
+    await db.delete(
+      'workout_routines',
+      where: 'id = ? AND is_custom = 1',
+      whereArgs: [id],
+    );
   }
 
   // --- Sessions & Personal Records ---
@@ -302,7 +430,11 @@ onOpen: (db) async {
     required double score,
     required String timestamp,
   }) async {
-    final rows = await db.query('personal_records', where: 'exercise = ?', whereArgs: [exercise]);
+    final rows = await db.query(
+      'personal_records',
+      where: 'exercise = ?',
+      whereArgs: [exercise],
+    );
     if (rows.isEmpty) {
       await db.insert('personal_records', {
         'exercise': exercise,
@@ -319,11 +451,7 @@ onOpen: (db) async {
 
       await db.update(
         'personal_records',
-        {
-          'max_result': newMax,
-          'best_score': newScore,
-          'updated_at': timestamp,
-        },
+        {'max_result': newMax, 'best_score': newScore, 'updated_at': timestamp},
         where: 'exercise = ?',
         whereArgs: [exercise],
       );
@@ -363,7 +491,8 @@ onOpen: (db) async {
       final val = (s['result_value'] as num).toDouble();
       final time = DateTime.tryParse(s['timestamp'] as String);
 
-      if (exercise.toLowerCase().contains('plank') || exercise.toLowerCase().contains('pose')) {
+      if (exercise.toLowerCase().contains('plank') ||
+          exercise.toLowerCase().contains('pose')) {
         totalHoldSeconds += val;
       } else {
         totalReps += val.round();
