@@ -17,4 +17,20 @@ class FormScorer {
     final bodyScore = bodyLineAngle > 160 ? 10.0 : (10 - (160 - bodyLineAngle) / 3).clamp(0, 10);
     return ((depthScore + bodyScore) / 2 * 10).round() / 10;
   }
+
+  /// legSpreadRatio: peak ankle-distance ÷ hip-width reached during the rep
+  /// (ideal ~2.0, meaning legs spread to about twice hip width)
+  /// armRaiseAmount: peak wrist-above-shoulder distance (normalized landmark
+  /// units) reached during the rep (ideal ~0.15)
+  static double scoreJumpingJack({required double legSpreadRatio, required double armRaiseAmount}) {
+    final legScore = (10 - (2.0 - legSpreadRatio).abs() * 8).clamp(0, 10);
+    final armScore = (armRaiseAmount / 0.15 * 10).clamp(0, 10);
+    return ((legScore + armScore) / 2 * 10).round() / 10;
+  }
+
+  /// Jump squats reuse the squat depth/back scoring, since the movement
+  /// pattern is the same — only the addition of a jump is new.
+  static double scoreJumpSquat({required double depthAngle, required double backAngle}) {
+    return scoreSquat(depthAngle: depthAngle, backAngle: backAngle);
+  }
 }
