@@ -11,6 +11,10 @@ import '../services/form_scorer.dart';
 import '../services/hold_timer.dart';
 import '../services/database_service.dart';
 import '../services/points_service.dart';
+import '../services/jumping_jack_detector.dart';
+import '../services/pose_visibility_checker.dart';
+import '../services/pose_stability_tracker.dart';
+import '../services/movement_analyzer.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -35,6 +39,27 @@ const Map<ExerciseType, ExerciseConfig> exerciseConfigs = {
   ExerciseType.squat: ExerciseConfig(label: "Squats", goal: 10, downThreshold: 110, upThreshold: 160),
   ExerciseType.pushup: ExerciseConfig(label: "Push-ups", goal: 5, downThreshold: 95, upThreshold: 155),
   ExerciseType.plank: ExerciseConfig(label: "Plank", goal: 20, isHoldBased: true),
+  ExerciseType.jumpingJack: ExerciseConfig(label: "Jumping Jacks", goal: 10),
+  ExerciseType.jumpSquat: ExerciseConfig(label: "Jump Squats", goal: 10, downThreshold: 110, upThreshold: 160),
+  ExerciseType.bicepsCurl: ExerciseConfig(label: "Biceps Curls", goal: 10, downThreshold: 70, upThreshold: 150),
+  ExerciseType.shoulderPress: ExerciseConfig(label: "Shoulder Press", goal: 10, downThreshold: 100, upThreshold: 160),
+  ExerciseType.lateralRaise: ExerciseConfig(label: "Lateral Raises", goal: 10, downThreshold: 40, upThreshold: 85),
+  ExerciseType.armRaise: ExerciseConfig(label: "Arm Raises", goal: 10, downThreshold: 40, upThreshold: 85),
+  ExerciseType.lunge: ExerciseConfig(label: "Lunges", goal: 10, downThreshold: 110, upThreshold: 160),
+  ExerciseType.reverseLunge: ExerciseConfig(label: "Reverse Lunges", goal: 10, downThreshold: 110, upThreshold: 160),
+  ExerciseType.calfRaise: ExerciseConfig(label: "Calf Raises", goal: 15, downThreshold: 130, upThreshold: 165),
+  ExerciseType.gluteBridge: ExerciseConfig(label: "Glute Bridges", goal: 10, downThreshold: 120, upThreshold: 160),
+  ExerciseType.sidePlank: ExerciseConfig(label: "Side Plank", goal: 15, isHoldBased: true),
+  ExerciseType.crunches: ExerciseConfig(label: "Crunches", goal: 12, downThreshold: 120, upThreshold: 160),
+  ExerciseType.standingKneeRaises: ExerciseConfig(label: "Standing Knee Raises", goal: 12, downThreshold: 85, upThreshold: 150),
+  ExerciseType.highKnees: ExerciseConfig(label: "High Knees", goal: 20, downThreshold: 85, upThreshold: 150),
+  ExerciseType.mountainClimbers: ExerciseConfig(label: "Mountain Climbers", goal: 15, downThreshold: 90, upThreshold: 150),
+  ExerciseType.burpees: ExerciseConfig(label: "Burpees", goal: 8, downThreshold: 95, upThreshold: 155),
+  ExerciseType.treePose: ExerciseConfig(label: "Tree Pose", goal: 15, isHoldBased: true),
+  ExerciseType.warriorTwo: ExerciseConfig(label: "Warrior II", goal: 15, isHoldBased: true),
+  ExerciseType.chairPose: ExerciseConfig(label: "Chair Pose", goal: 15, isHoldBased: true),
+  ExerciseType.forwardBend: ExerciseConfig(label: "Standing Forward Bend", goal: 15, isHoldBased: true),
+  ExerciseType.shoulderMobility: ExerciseConfig(label: "Shoulder Mobility", goal: 15, isHoldBased: true),
 };
 
 class TrackingScreen extends StatefulWidget {
@@ -56,6 +81,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
   late final ExerciseType _selectedExercise; // fixed for this screen instance
 
   final List<double> _angleBuffer = [];
+  final PoseStabilityTracker _stabilityTracker = PoseStabilityTracker();
   double _currentAngle = 0;
   int _repCount = 0;
   late RepDetector _repDetector;
@@ -73,6 +99,14 @@ class _TrackingScreenState extends State<TrackingScreen> {
   final HoldTimer _holdTimer = HoldTimer();
   double? _chestHeightBaseline;
   bool _plankFormBroken = false;
+
+  // Jumping Jack-specific state
+  final JumpingJackDetector _jjDetector = JumpingJackDetector();
+
+  // Jump Squat-specific state (reuses squat RepDetector, adds jump confirmation)
+  double? _standingHipYBaseline;
+  double _lowestHipYAfterRep = 1.0; // tracks the highest point (smallest y) reached shortly after a rep
+  int _jumpCheckFramesRemaining = 0;
 
   // Points & persistence
   final DatabaseService _db = DatabaseService();
@@ -152,31 +186,38 @@ class _TrackingScreenState extends State<TrackingScreen> {
       _chestHeightBaseline = null;
       _plankFormBroken = false;
       _sessionPointsEarned = 0;
+      _jjDetector.reset();
+      _standingHipYBaseline = null;
+      _lowestHipYAfterRep = 1.0;
+      _jumpCheckFramesRemaining = 0;
     });
   }
 
+  String? _cameraError;
+
   Future<void> _initCamera() async {
-    if (cameras.isEmpty) {
-      cameras = await availableCameras();
-    }
-    if (cameras.isEmpty) {
-      debugPrint("No cameras found on this device.");
-      return;
-    }
-
-    _selectedCamera = cameras.firstWhere(
-      (cam) => cam.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
-    );
-
-    _controller = CameraController(
-      _selectedCamera!,
-      ResolutionPreset.medium,
-      enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.nv21,
-    );
-
+    setState(() => _cameraError = null);
     try {
+      if (cameras.isEmpty) {
+        cameras = await availableCameras();
+      }
+      if (cameras.isEmpty) {
+        setState(() => _cameraError = "No camera hardware detected on this device.");
+        return;
+      }
+
+      _selectedCamera = cameras.firstWhere(
+        (cam) => cam.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+
+      _controller = CameraController(
+        _selectedCamera!,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.nv21,
+      );
+
       await _controller!.initialize();
       if (!mounted) return;
       setState(() {
@@ -184,7 +225,10 @@ class _TrackingScreenState extends State<TrackingScreen> {
       });
       _controller!.startImageStream(_processCameraImage);
     } catch (e) {
-      debugPrint("Camera initialization error: $e");
+      if (!mounted) return;
+      setState(() {
+        _cameraError = "Camera access error: $e";
+      });
     }
   }
 
@@ -200,16 +244,32 @@ class _TrackingScreenState extends State<TrackingScreen> {
         double currentAngle = _currentAngle;
         if (poses.isNotEmpty) {
           final landmarks = poses.first.landmarks;
+          final visibility = PoseVisibilityChecker.checkVisibility(_selectedExercise, landmarks);
 
-          if (!_calibration.isCalibrated) {
+          if (!visibility.isFullyVisible) {
+            _showBanner(visibility.warningMessage ?? "Adjust camera — full body not visible");
+            _voice.speak(visibility.warningMessage ?? "Adjust camera position", minGapMs: 2500);
+          } else if (!_calibration.isCalibrated) {
             final justCalibrated = _calibration.checkStart(_selectedExercise, landmarks);
             if (justCalibrated) {
               _voice.speak("Position matched. Start!", force: true, minGapMs: 0);
             }
           } else {
-            currentAngle = _selectedExercise == ExerciseType.plank
-                ? _handlePlankTracking(landmarks) ?? currentAngle
-                : _handleActiveTracking(landmarks) ?? currentAngle;
+            final frame = MovementAnalyzer.analyzeFrame(_selectedExercise, landmarks, _angleBuffer);
+            if (frame != null && frame.formWarning != null) {
+              _showBanner(frame.formWarning!);
+              _voice.speak(frame.formWarning!, minGapMs: 2000);
+            }
+
+            if (_selectedExercise == ExerciseType.plank || exerciseConfigs[_selectedExercise]?.isHoldBased == true) {
+              currentAngle = _handlePlankTracking(landmarks) ?? currentAngle;
+            } else if (_selectedExercise == ExerciseType.jumpingJack) {
+              currentAngle = _handleJumpingJackTracking(landmarks) ?? currentAngle;
+            } else if (_selectedExercise == ExerciseType.jumpSquat) {
+              currentAngle = _handleJumpSquatTracking(landmarks) ?? currentAngle;
+            } else {
+              currentAngle = _handleActiveTracking(landmarks) ?? (frame?.primaryAngle ?? currentAngle);
+            }
           }
         }
 
@@ -335,15 +395,20 @@ class _TrackingScreenState extends State<TrackingScreen> {
     _chestHeightBaseline ??= chestHeight;
     final dropFromBaseline = chestHeight - _chestHeightBaseline!;
 
+    final stabilityScore = _stabilityTracker.update(hip);
+    final isStable = _stabilityTracker.isStable(stabilityScore);
+
     final angleOk = bodyLineAngle > 155 && elbowAngle >= 50 && elbowAngle <= 130;
     final notCollapsed = dropFromBaseline < 60;
-    final isGoodForm = angleOk && notCollapsed;
+    final isGoodForm = angleOk && notCollapsed && isStable;
 
     if (!isGoodForm && !_plankFormBroken) {
       _plankFormBroken = true;
-      final message = !notCollapsed
-          ? "Form broken. You've dropped too low — lift back up."
-          : "Form broken. Straighten your body to continue.";
+      final message = !isStable
+          ? "Form unstable — hold steady to continue."
+          : (!notCollapsed
+              ? "Form broken. You've dropped too low — lift back up."
+              : "Form broken. Straighten your body to continue.");
       _voice.speak(message, force: true, minGapMs: 2000);
     } else if (isGoodForm && _plankFormBroken) {
       _plankFormBroken = false;
@@ -370,6 +435,158 @@ class _TrackingScreenState extends State<TrackingScreen> {
     }
 
     return bodyLineAngle;
+  }
+
+  /// Jumping jacks use two boolean conditions (arms raised, legs spread)
+  /// rather than a single joint angle. Uses both left and right landmarks
+  /// since jumping jacks are performed facing the camera symmetrically,
+  /// making both sides reliably visible (unlike side-on exercises).
+  double? _handleJumpingJackTracking(Map<PoseLandmarkType, PoseLandmark?> landmarks) {
+    final cfg = exerciseConfigs[ExerciseType.jumpingJack]!;
+    final lShoulder = landmarks[PoseLandmarkType.leftShoulder];
+    final rShoulder = landmarks[PoseLandmarkType.rightShoulder];
+    final lWrist = landmarks[PoseLandmarkType.leftWrist];
+    final rWrist = landmarks[PoseLandmarkType.rightWrist];
+    final lHip = landmarks[PoseLandmarkType.leftHip];
+    final rHip = landmarks[PoseLandmarkType.rightHip];
+    final lAnkle = landmarks[PoseLandmarkType.leftAnkle];
+    final rAnkle = landmarks[PoseLandmarkType.rightAnkle];
+
+    if (lShoulder == null || rShoulder == null || lWrist == null || rWrist == null ||
+        lHip == null || rHip == null || lAnkle == null || rAnkle == null) {
+      return null;
+    }
+
+    final armsUp = lWrist.y < lShoulder.y && rWrist.y < rShoulder.y;
+    final armRaiseAmount = ((lShoulder.y - lWrist.y) + (rShoulder.y - rWrist.y)) / 2;
+
+    final hipWidth = (lHip.x - rHip.x).abs();
+    final ankleSpread = (lAnkle.x - rAnkle.x).abs();
+    final legSpreadRatio = hipWidth == 0 ? 0.0 : ankleSpread / hipWidth;
+    final legsApart = legSpreadRatio > 1.6;
+
+    final repCompleted = _jjDetector.update(
+      armsUp: armsUp,
+      legsApart: legsApart,
+      legSpreadRatio: legSpreadRatio,
+      armRaiseAmount: armRaiseAmount,
+    );
+
+    if (repCompleted) {
+      _repCount++;
+      final score = FormScorer.scoreJumpingJack(
+        legSpreadRatio: _jjDetector.maxLegSpread,
+        armRaiseAmount: _jjDetector.maxArmRaise,
+      );
+      _scores.add(score);
+      _voice.speak("$_repCount", force: true, minGapMs: 0);
+      _awardPoints(PointsService.pointsForRep(score));
+
+      if (_repCount >= cfg.goal) {
+        _sessionComplete = true;
+        _awardPoints(PointsService.sessionBonus(false));
+        final avgScore = _scores.reduce((a, b) => a + b) / _scores.length;
+        _db.saveSession(
+          exercise: cfg.label,
+          resultValue: _repCount.toDouble(),
+          avgScore: avgScore,
+          pointsEarned: _sessionPointsEarned + PointsService.sessionBonus(false),
+        );
+        Future.delayed(const Duration(milliseconds: 900), () {
+          _voice.speak(
+            "Session complete! You finished all ${cfg.goal} reps. Excellent work!",
+            force: true,
+            minGapMs: 0,
+          );
+        });
+      }
+    }
+
+    return armRaiseAmount * 100; // displayed as a rough "openness" indicator
+  }
+
+  /// Jump squats reuse the exact same squat detection logic (knee angle,
+  /// back angle, rep counting, scoring) — the only addition is checking
+  /// for a brief upward hip movement shortly after standing back up, as a
+  /// bonus confirmation. Reps are NOT rejected if no jump is detected —
+  /// reliably measuring jump height from a phone camera at typical frame
+  /// rates is genuinely difficult, so this stays lenient by design rather
+  /// than risk frustrating false rejections.
+  double? _handleJumpSquatTracking(Map<PoseLandmarkType, PoseLandmark?> landmarks) {
+    final cfg = exerciseConfigs[ExerciseType.jumpSquat]!;
+    final shoulder = landmarks[PoseLandmarkType.leftShoulder];
+    final hip = landmarks[PoseLandmarkType.leftHip];
+    final knee = landmarks[PoseLandmarkType.leftKnee];
+    final ankle = landmarks[PoseLandmarkType.leftAnkle];
+
+    if (shoulder == null || hip == null || knee == null || ankle == null) return null;
+
+    _standingHipYBaseline ??= hip.y;
+
+    final rawAngle = AngleCalculator.calculateAngle(hip, knee, ankle);
+    final angle = AngleCalculator.smooth(_angleBuffer, rawAngle);
+
+    if (_repDetector.state == "down") {
+      final backAngle = AngleCalculator.calculateAngle(shoulder, hip, knee);
+      _minSecondaryAngleThisRep = backAngle < _minSecondaryAngleThisRep ? backAngle : _minSecondaryAngleThisRep;
+      if (backAngle < 145 && !_formWarnedThisRep) {
+        _voice.speak("Stop. Straighten your back.", force: true, minGapMs: 1200);
+        _formWarnedThisRep = true;
+      }
+    }
+
+    if (_jumpCheckFramesRemaining > 0) {
+      _lowestHipYAfterRep = hip.y < _lowestHipYAfterRep ? hip.y : _lowestHipYAfterRep;
+      _jumpCheckFramesRemaining--;
+    }
+
+    final wasDown = _repDetector.state == "down";
+    final depthAtRepEnd = _repDetector.extremeAngle;
+    final wasWarnedThisRep = _formWarnedThisRep;
+    final repCompleted = _repDetector.update(angle);
+
+    if (wasDown == false && _repDetector.state == "down") {
+      _formWarnedThisRep = false;
+      _minSecondaryAngleThisRep = 200;
+    }
+
+    if (repCompleted) {
+      if (wasWarnedThisRep) {
+        _showBanner("Rep not counted — fix your form and try again");
+      } else {
+        _repCount++;
+        final secondaryForScore = _minSecondaryAngleThisRep == 200 ? 150.0 : _minSecondaryAngleThisRep;
+        final score = FormScorer.scoreJumpSquat(depthAngle: depthAtRepEnd ?? 90, backAngle: secondaryForScore);
+        _scores.add(score);
+        _voice.speak("$_repCount", force: true, minGapMs: 0);
+        _awardPoints(PointsService.pointsForRep(score));
+
+        // Start a short window to check for a jump right after standing up
+        _lowestHipYAfterRep = hip.y;
+        _jumpCheckFramesRemaining = 8;
+
+        if (_repCount >= cfg.goal) {
+          _sessionComplete = true;
+          _awardPoints(PointsService.sessionBonus(false));
+          final avgScore = _scores.reduce((a, b) => a + b) / _scores.length;
+          _db.saveSession(
+            exercise: cfg.label,
+            resultValue: _repCount.toDouble(),
+            avgScore: avgScore,
+            pointsEarned: _sessionPointsEarned + PointsService.sessionBonus(false),
+          );
+          Future.delayed(const Duration(milliseconds: 900), () {
+            _voice.speak(
+              "Session complete! You finished all ${cfg.goal} reps. Excellent work!",
+              force: true,
+              minGapMs: 0,
+            );
+          });
+        }
+      }
+    }
+
+    return angle;
   }
 
   InputImage? _convertCameraImage(CameraImage image) {
@@ -468,7 +685,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: Colors.red.shade900.withOpacity(0.85),
+                        color: Colors.red.shade900.withValues(alpha: 0.85),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
@@ -506,11 +723,13 @@ class _TrackingScreenState extends State<TrackingScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            _selectedExercise == ExerciseType.squat
+                            _selectedExercise == ExerciseType.squat || _selectedExercise == ExerciseType.jumpSquat
                                 ? "Match the outline: stand straight, full body visible"
                                 : _selectedExercise == ExerciseType.pushup
                                     ? "Match the outline: top push-up position, side-on view"
-                                    : "Match the outline: forearm plank position, side-on view",
+                                    : _selectedExercise == ExerciseType.plank
+                                        ? "Match the outline: forearm plank position, side-on view"
+                                        : "Match the outline: stand straight, facing the camera",
                             textAlign: TextAlign.center,
                             style: const TextStyle(color: Colors.white, fontSize: 14),
                           ),
@@ -534,7 +753,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
                       child: Text(
                         cfg.isHoldBased
                             ? "Held: ${_holdTimer.heldSeconds.toStringAsFixed(1)}s / ${cfg.goal}s   (${_plankFormBroken ? 'paused' : 'holding'})"
-                            : "Reps: $_repCount / ${cfg.goal}   (state: ${_repDetector.state})",
+                            : "Reps: $_repCount / ${cfg.goal}   (state: ${_selectedExercise == ExerciseType.jumpingJack ? _jjDetector.state : _repDetector.state})",
                         style: const TextStyle(color: Colors.tealAccent, fontSize: 15, fontWeight: FontWeight.bold),
                       ),
                     ),
@@ -588,7 +807,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                               decoration: BoxDecoration(
-                                color: Colors.amber.withOpacity(0.15),
+                                color: Colors.amber.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(8),
                               ),
                               child: Text(
@@ -627,8 +846,30 @@ class _TrackingScreenState extends State<TrackingScreen> {
                   ),
               ],
             )
-          : const Center(
-              child: CircularProgressIndicator(color: Colors.teal),
+          : Center(
+              child: _cameraError != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.videocam_off, color: Colors.redAccent, size: 48),
+                          const SizedBox(height: 16),
+                          Text(
+                            _cameraError!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white70, fontSize: 14),
+                          ),
+                          const SizedBox(height: 20),
+                          ElevatedButton.icon(
+                            onPressed: _initCamera,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text("Retry Camera Initialization"),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const CircularProgressIndicator(color: Colors.tealAccent),
             ),
     );
   }
@@ -665,19 +906,35 @@ class ShadowGuidePainter extends CustomPainter {
     canvas.translate(-size.width / 2, -size.height / 2);
 
     final paint = Paint()
-      ..color = Colors.tealAccent.withOpacity(0.5)
+      ..color = Colors.tealAccent.withValues(alpha: 0.5)
       ..strokeWidth = 6
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
 
     final markerPaint = Paint()
-      ..color = Colors.tealAccent.withOpacity(0.6)
+      ..color = Colors.tealAccent.withValues(alpha: 0.6)
       ..style = PaintingStyle.fill;
 
     final w = size.width;
     final h = size.height;
 
-    if (exercise == ExerciseType.squat) {
+    if (exercise == ExerciseType.squat || exercise == ExerciseType.jumpSquat) {
+      final cx = w * 0.5;
+      final headY = h * 0.18;
+      final shoulderY = h * 0.26;
+      final hipY = h * 0.52;
+      final ankleY = h * 0.88;
+
+      canvas.drawCircle(Offset(cx, headY), h * 0.045, paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx, hipY), paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx - w * 0.12, hipY * 0.95), paint);
+      canvas.drawLine(Offset(cx, shoulderY), Offset(cx + w * 0.12, hipY * 0.95), paint);
+      canvas.drawLine(Offset(cx, hipY), Offset(cx - w * 0.06, ankleY), paint);
+      canvas.drawLine(Offset(cx, hipY), Offset(cx + w * 0.06, ankleY), paint);
+    } else if (exercise == ExerciseType.jumpingJack) {
+      // Standing figure, arms and legs relaxed — calibration matches the
+      // same "standing straight" pose as squats; the open/closed motion
+      // itself is detected during tracking, not required for calibration.
       final cx = w * 0.5;
       final headY = h * 0.18;
       final shoulderY = h * 0.26;
@@ -742,7 +999,7 @@ class SkeletonPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round;
 
     final linePaint = Paint()
-      ..color = Colors.tealAccent.withOpacity(0.7)
+      ..color = Colors.tealAccent.withValues(alpha: 0.7)
       ..strokeWidth = 3;
 
     final scaleX = size.width / imageSize.width;
